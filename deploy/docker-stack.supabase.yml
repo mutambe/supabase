@@ -14,8 +14,7 @@ version: "3.9"
 # PRE-REQUISITO antes do primeiro deploy: os ficheiros de configuracao e
 # scripts SQL de arranque do Postgres (kong.yml, kong-entrypoint.sh, *.sql,
 # pooler.exs - todos em docker/volumes/ neste mesmo repositorio) tem de
-# existir no no indicado por SUPABASE_NODE_HOSTNAME, no caminho
-# ${SUPABASE_VOLUMES_PATH}.
+# existir nos nodes indicados abaixo, no caminho ${SUPABASE_VOLUMES_PATH}.
 #
 # Edge Functions nao estao incluidas (fora do ambito inicial); pode
 # adicionar-se depois como servico extra sem mudar o resto do stack.
@@ -25,12 +24,20 @@ version: "3.9"
 # rollback_config para rolling deploys mais seguros, e replicas=2 nos
 # servicos stateless (kong, rest, auth, storage, studio, meta, imgproxy).
 #
-# IMPORTANTE: todos os servicos continuam fixos ao mesmo node via
-# placement.constraints (os volumes usam bind mounts locais em
-# SUPABASE_VOLUMES_PATH). Por isso "replicas" aqui da resiliencia a crash
-# de container e deploys sem downtime, mas NAO protege contra falha do
-# node em si. Para HA multi-node real seria preciso storage partilhado
-# (NFS/GlusterFS) ou um Postgres gerido externamente.
+# TOPOLOGIA (2 nodes): os servicos pesados (db/postgres, storage, imgproxy -
+# este ultimo partilha o bind mount de storage com o storage-api, por isso
+# tem de correr no mesmo node) ficam fixos no node indicado por
+# SUPABASE_NODE_HEAVY (worker). Os restantes servicos, mais leves (kong,
+# auth, rest, realtime, studio, meta, supavisor), ficam fixos no node
+# indicado por SUPABASE_NODE_LIGHT (manager). Cada node so precisa de ter em
+# ${SUPABASE_VOLUMES_PATH} as subpastas dos servicos que la correm.
+#
+# IMPORTANTE: dentro de cada grupo os servicos continuam fixos ao mesmo node
+# via placement.constraints (os volumes usam bind mounts locais). Por isso
+# "replicas" aqui da resiliencia a crash de container e deploys sem
+# downtime, mas NAO protege contra falha de um node inteiro. Para HA
+# multi-node real seria preciso storage partilhado (NFS/GlusterFS) ou um
+# Postgres gerido externamente.
 
 networks:
   traefik_public:
@@ -81,7 +88,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:
@@ -126,7 +133,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:
@@ -191,7 +198,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:
@@ -230,7 +237,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:
@@ -284,7 +291,7 @@ services:
       replicas: 1
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:
@@ -334,7 +341,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_HEAVY}
       restart_policy:
         condition: on-failure
       update_config:
@@ -362,7 +369,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_HEAVY}
       restart_policy:
         condition: on-failure
       update_config:
@@ -392,7 +399,7 @@ services:
       replicas: 2
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:
@@ -444,7 +451,7 @@ services:
       replicas: 1
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_HEAVY}
       restart_policy:
         condition: on-failure
       update_config:
@@ -492,7 +499,7 @@ services:
       replicas: 1
       placement:
         constraints:
-          - node.hostname == ${SUPABASE_NODE_HOSTNAME}
+          - node.hostname == ${SUPABASE_NODE_LIGHT}
       restart_policy:
         condition: on-failure
       update_config:

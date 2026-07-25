@@ -1,24 +1,36 @@
 version: "3.9"
 
-# Stack Docker Swarm para uma instância self-hosted do Supabase, atrás do
-# Traefik já existente na VPS da Songhai (rede "traefik_public", resolver
-# "letsencrypt" — mesmo padrão do docker-stack.yml do monorepo songhai).
+# Stack Docker Swarm para uma instancia self-hosted do Supabase, atras do
+# Traefik ja existente na VPS da Songhai (rede "traefik_public", resolver
+# "letsencrypt" - mesmo padrao do docker-stack.yml do monorepo songhai).
 #
-# Só o serviço "kong" (gateway API) fica exposto publicamente em
-# supabase.songhai.cc — ele próprio encaminha para Auth, REST, Realtime,
+# So o servico "kong" (gateway API) fica exposto publicamente em
+# supabase.songhai.cc - ele proprio encaminha para Auth, REST, Realtime,
 # Storage e Studio por caminho (/auth/v1, /rest/v1, /realtime/v1,
 # /storage/v1, /) usando o kong.yml oficial do Supabase (docker/volumes/api
-# neste repositório). Não são precisos subdomínios extra
+# neste repositorio). Nao sao precisos subdominios extra
 # (api./auth./storage./realtime./meta.supabase.songhai.cc).
 #
-# PRÉ-REQUISITO antes do primeiro deploy: os ficheiros de configuração e
+# PRE-REQUISITO antes do primeiro deploy: os ficheiros de configuracao e
 # scripts SQL de arranque do Postgres (kong.yml, kong-entrypoint.sh, *.sql,
-# pooler.exs — todos em docker/volumes/ neste mesmo repositório) têm de
-# existir no nó indicado por SUPABASE_NODE_HOSTNAME, no caminho
+# pooler.exs - todos em docker/volumes/ neste mesmo repositorio) tem de
+# existir no no indicado por SUPABASE_NODE_HOSTNAME, no caminho
 # ${SUPABASE_VOLUMES_PATH}.
 #
-# Edge Functions não estão incluídas (fora do âmbito inicial); pode
-# adicionar-se depois como serviço extra sem mudar o resto do stack.
+# Edge Functions nao estao incluidas (fora do ambito inicial); pode
+# adicionar-se depois como servico extra sem mudar o resto do stack.
+#
+# HARDENING (adicionado): healthchecks nos servicos onde a imagem tem
+# ferramentas confirmadas (db, studio, auth, storage), update_config e
+# rollback_config para rolling deploys mais seguros, e replicas=2 nos
+# servicos stateless (kong, rest, auth, storage, studio, meta, imgproxy).
+#
+# IMPORTANTE: todos os servicos continuam fixos ao mesmo node via
+# placement.constraints (os volumes usam bind mounts locais em
+# SUPABASE_VOLUMES_PATH). Por isso "replicas" aqui da resiliencia a crash
+# de container e deploys sem downtime, mas NAO protege contra falha do
+# node em si. Para HA multi-node real seria preciso storage partilhado
+# (NFS/GlusterFS) ou um Postgres gerido externamente.
 
 networks:
   traefik_public:
@@ -59,13 +71,27 @@ services:
     volumes:
       - ${SUPABASE_VOLUMES_PATH}/snippets:/app/snippets
       - ${SUPABASE_VOLUMES_PATH}/functions:/app/edge-functions:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://studio:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(String(r.status))})"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   kong:
     image: kong/kong:3.9.1
@@ -90,13 +116,27 @@ services:
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     entrypoint: ["/bin/sh", "/home/kong/kong-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
       labels:
         - traefik.enable=true
         - traefik.docker.network=traefik_public
@@ -141,13 +181,27 @@ services:
       GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAILER_URLPATHS_EMAIL_CHANGE}
       GOTRUE_EXTERNAL_PHONE_ENABLED: ${ENABLE_PHONE_SIGNUP}
       GOTRUE_SMS_AUTOCONFIRM: ${ENABLE_PHONE_AUTOCONFIRM}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   rest:
     image: postgrest/postgrest:v14.12
@@ -168,20 +222,37 @@ services:
       PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
       PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
     command: ["postgrest"]
+    # Nota: a imagem oficial do PostgREST e um binario estatico minimalista
+    # (sem wget/curl/shell utils), por isso nao incluimos healthcheck aqui
+    # para evitar falsos "unhealthy". O endpoint admin (porta 3001) expoe
+    # /ready e /live, que podem ser usados por um sidecar ou pelo Kong.
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   realtime:
     # O kong.yml oficial encaminha para "realtime-dev.supabase-realtime:4000"
-    # (é assim que o Realtime identifica o tenant self-host). Em Compose
+    # (e assim que o Realtime identifica o tenant self-host). Em Compose
     # normal isto resolvia por causa do container_name; em Swarm o DNS do
-    # overlay só resolve pelo nome do serviço + aliases explícitos — por
-    # isso o alias abaixo é obrigatório, "hostname:" sozinho não chega.
+    # overlay so resolve pelo nome do servico + aliases explicitos - por
+    # isso o alias abaixo e obrigatorio, "hostname:" sozinho nao chega.
+    #
+    # Mantido em replicas=1: o Realtime espera-se correr como um unico no
+    # (ou cluster Erlang configurado explicitamente); multiplas replicas
+    # atras do mesmo alias sem clustering Erlang configurado podem causar
+    # comportamento inconsistente nas subscricoes.
     hostname: realtime-dev.supabase-realtime
     image: supabase/realtime:v2.102.3
     networks:
@@ -216,6 +287,14 @@ services:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   storage:
     image: supabase/storage-api:v1.60.4
@@ -245,13 +324,27 @@ services:
       S3_PROTOCOL_ACCESS_KEY_SECRET: ${S3_PROTOCOL_ACCESS_KEY_SECRET}
     volumes:
       - ${SUPABASE_VOLUMES_PATH}/storage:/var/lib/storage
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   imgproxy:
     image: darthsim/imgproxy:v3.30.1
@@ -266,12 +359,20 @@ services:
       IMGPROXY_AUTO_WEBP: ${IMGPROXY_AUTO_WEBP}
       IMGPROXY_MAX_SRC_RESOLUTION: 16.8
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   meta:
     image: supabase/postgres-meta:v0.96.6
@@ -288,12 +389,20 @@ services:
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
       CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
 
   db:
     image: supabase/postgres:17.6.1.136
@@ -325,6 +434,12 @@ services:
         "-c", "config_file=/etc/postgresql/postgresql.conf",
         "-c", "log_min_messages=fatal"
       ]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     deploy:
       replicas: 1
       placement:
@@ -332,6 +447,11 @@ services:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: pause
 
   supavisor:
     image: supabase/supavisor:2.9.5
@@ -365,6 +485,9 @@ services:
         "/bin/sh", "-c",
         "/app/bin/migrate && /app/bin/supavisor eval \"$$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"
       ]
+    # Mantido em replicas=1: pooler de conexoes com estado de sessao;
+    # aumentar replicas exige testar o comportamento em modo "transaction"
+    # com multiplas instancias antes de usar em producao.
     deploy:
       replicas: 1
       placement:
@@ -372,3 +495,8 @@ services:
           - node.hostname == ${SUPABASE_NODE_HOSTNAME}
       restart_policy:
         condition: on-failure
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+        failure_action: rollback
